@@ -24,4 +24,7 @@ setup(
         "requests",
     ],
     python_requires='>=3.5',
+    scripts=[
+        "buildkite-webhook-listener.py",
+    ],
 )
