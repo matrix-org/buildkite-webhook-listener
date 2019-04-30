@@ -169,7 +169,10 @@ def deploy_tarball(artifact_url, target_dir):
 
     resp = requests.get(artifact_url, stream=True, headers=req_headers())
     resp.raise_for_status()
-    with tarfile.open(fileobj=resp.raw) as tar:
+
+    # TODO: make the compression type depend on the filename
+    # (or copy it to a temporary file so that tarfile can autodetect)
+    with tarfile.open(fileobj=resp.raw, mode="r:gz") as tar:
         tar.extractall(path=target_dir)
 
     print("...download complete.")
