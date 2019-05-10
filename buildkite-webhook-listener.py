@@ -26,6 +26,7 @@ import errno
 import os
 import re
 import tarfile
+import threading
 
 from flask import Flask, abort, jsonify, request
 import requests
@@ -38,9 +39,12 @@ arg_webhook_token = None
 arg_api_token = None
 arg_artifact_pattern = None
 
+deploy_lock = threading.Lock()
+
 
 def create_symlink(source, linkname):
     try:
+        print("Symlinking %s->%s", linkname, source)
         os.symlink(source, linkname)
     except OSError as e:
         if e.errno == errno.EEXIST:
@@ -151,8 +155,15 @@ def on_receive_buildkite_poke():
     if os.path.exists(target_dir):
         abort(400, "Not deploying. We have previously deployed this build.")
 
-    deploy_tarball(url, target_dir)
-    create_symlink(source=target_dir, linkname=arg_symlink)
+    # buildkite times out the request if it takes longer than 10s, and fetching
+    # the tarball may take some time, so we return success now and run the download
+    # and deployment in the background.
+    def deploy():
+        with deploy_lock:
+            deploy_tarball(url, target_dir)
+
+    threading.Thread(target=deploy, args=(url, target_dir))
+
     return jsonify({})
 
 
@@ -174,8 +185,9 @@ def deploy_tarball(artifact_url, target_dir):
     # (or copy it to a temporary file so that tarfile can autodetect)
     with tarfile.open(fileobj=resp.raw, mode="r:gz") as tar:
         tar.extractall(path=target_dir)
-
     print("...download complete.")
+
+    create_symlink(source=target_dir, linkname=arg_symlink)
 
 
 if __name__ == "__main__":
