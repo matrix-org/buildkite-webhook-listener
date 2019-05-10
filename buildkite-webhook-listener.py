@@ -161,15 +161,15 @@ def on_receive_buildkite_poke():
         abort(400, "Not deploying. We have previously deployed this build.")
 
     # buildkite times out the request if it takes longer than 10s, and fetching
-    # the tarball may take some time, so we return success now and run the download
-    # and deployment in the background.
+    # the tarball may take some time, so we return success now and run the
+    # download and deployment in the background.
     def deploy():
         logger.info("awaiting deploy lock")
         with deploy_lock:
             logger.info("Got deploy lock; deploying to %s", target_dir)
             deploy_tarball(url, target_dir)
 
-    threading.Thread(target=deploy, args=(url, target_dir))
+    threading.Thread(target=deploy).start()
 
     return jsonify({})
 
