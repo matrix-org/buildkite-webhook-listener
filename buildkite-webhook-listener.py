@@ -23,6 +23,7 @@ from __future__ import print_function
 
 import argparse
 import errno
+import logging
 import os
 import re
 import tarfile
@@ -30,6 +31,9 @@ import threading
 
 from flask import Flask, abort, jsonify, request
 import requests
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
 app = Flask(__name__)
 
@@ -44,7 +48,7 @@ deploy_lock = threading.Lock()
 
 def create_symlink(source, linkname):
     try:
-        print("Symlinking %s->%s", linkname, source)
+        logger.info("Symlinking %s->%s", linkname, source)
         os.symlink(source, linkname)
     except OSError as e:
         if e.errno == errno.EEXIST:
@@ -65,7 +69,7 @@ def req_headers():
 def on_receive_buildkite_poke():
     got_webhook_token = request.headers.get('X-Buildkite-Token')
     if got_webhook_token != arg_webbook_token:
-        print("Denying request with incorrect webhook token: %s" % (got_webhook_token,))
+        logger.info("Denying request with incorrect webhook token: %s", got_webhook_token)
         abort(400, "Incorrect webhook token")
         return
 
@@ -77,7 +81,7 @@ def on_receive_buildkite_poke():
     if not incoming_json:
         abort(400, "No JSON provided!")
         return
-    print("Incoming JSON: %s" % (incoming_json,))
+    logger.debug("Incoming JSON: %s", incoming_json)
 
     event = incoming_json.get("event")
     if event is None:
@@ -85,11 +89,11 @@ def on_receive_buildkite_poke():
         return
 
     if event == 'ping':
-        print("Got ping request - responding")
+        logger.info("Got ping request - responding")
         return jsonify({'response': 'pong!'})
 
     if event != 'build.finished':
-        print("Rejecting '%s' event")
+        logger.info("Rejecting '%s' event", event)
         abort(400, "Unrecognised event")
         return
 
@@ -104,7 +108,7 @@ def on_receive_buildkite_poke():
         return
 
     if required_api_prefix is not None and not build_url.startswith(required_api_prefix):
-        print("Denying poke for build url with incorrect prefix: %s" % (build_url,))
+        logger.info("Denying poke for build url with incorrect prefix: %s", build_url)
         abort(400, "Invalid build url")
         return
 
@@ -124,6 +128,7 @@ def on_receive_buildkite_poke():
         return
 
     artifacts_url = build_url + "/artifacts"
+    logger.info("fetching %s", artifacts_url)
     artifacts_resp = requests.get(artifacts_url, headers=req_headers())
     artifacts_resp.raise_for_status()
     artifacts_array = artifacts_resp.json()
@@ -134,13 +139,13 @@ def on_receive_buildkite_poke():
             artifact_to_deploy = artifact
 
     if artifact_to_deploy is None:
-        print("No suitable artifacts found")
+        logger.info("No suitable artifacts found")
         return jsonify({})
 
     # double paranoia check: make sure the artifact is on the right org too
     url = artifact_to_deploy['download_url']
     if required_api_prefix is not None and not url.startswith(required_api_prefix):
-        print("Denying poke for build url with incorrect prefix: %s" % (url,))
+        logger.info("Denying poke for build url with incorrect prefix: %s", url)
         abort(400, "Refusing to deploy artifact from URL %s", url)
         return
 
@@ -159,7 +164,9 @@ def on_receive_buildkite_poke():
     # the tarball may take some time, so we return success now and run the download
     # and deployment in the background.
     def deploy():
+        logger.info("awaiting deploy lock")
         with deploy_lock:
+            logger.info("Got deploy lock; deploying to %s", target_dir)
             deploy_tarball(url, target_dir)
 
     threading.Thread(target=deploy, args=(url, target_dir))
@@ -176,7 +183,7 @@ def deploy_tarball(artifact_url, target_dir):
 
     os.mkdir(target_dir)
 
-    print("Fetching artifact %s -> %s..." % (artifact_url, target_dir))
+    logger.info("Fetching artifact %s -> %s...", artifact_url, target_dir)
 
     resp = requests.get(artifact_url, stream=True, headers=req_headers())
     resp.raise_for_status()
@@ -185,7 +192,7 @@ def deploy_tarball(artifact_url, target_dir):
     # (or copy it to a temporary file so that tarfile can autodetect)
     with tarfile.open(fileobj=resp.raw, mode="r:gz") as tar:
         tar.extractall(path=target_dir)
-    print("...download complete.")
+    logger.info("...download complete.")
 
     create_symlink(source=target_dir, linkname=arg_symlink)
 
@@ -258,6 +265,7 @@ if __name__ == "__main__":
             args.port,
             arg_extract_path,
             arg_symlink,
-        )
+        ),
+        flush=True,
     )
     app.run(port=args.port, debug=False)
