@@ -170,8 +170,8 @@ def on_receive_buildkite_poke():
         with deploy_lock:
             logger.info("Got deploy lock; deploying to %s", target_dir)
             deploy_tarball(url, target_dir)
-            if args_keep_versions is not None:
-                tidy_old_versions(target_dir, pipeline_name)
+            if arg_keep_versions is not None:
+                tidy_extract_directory(target_dir, pipeline_name)
 
     threading.Thread(target=deploy).start()
 
@@ -207,7 +207,7 @@ def tidy_extract_directory(target_dir, pipeline_name):
     Will never remove the target_dir as we just deployed it.
     Will only consider directories that match pipeline_name.
     """
-    directories = glob.glob(args_extract_directory + "/" + pipeline_name + "*")
+    directories = glob.glob(args_extract_directory + "/" + pipeline_name + "-#*")
   
     directories.sort(key = lambda x: os.path.getmtime(x))
     to_delete = directories[:-arg_keep_versions]
@@ -216,9 +216,6 @@ def tidy_extract_directory(target_dir, pipeline_name):
         if target != target_dir: 
             shutil.rmtree(target)
         
-
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Runs a redeployment server.")
     parser.add_argument(
