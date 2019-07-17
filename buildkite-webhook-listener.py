@@ -203,9 +203,9 @@ def deploy_tarball(artifact_url, target_dir):
 
 def tidy_extract_directory(target_dir, pipeline_name):
     """
-    Remove all but the last count versions in the directory.
-    Will never remove the target_dir as we just deployed it.
-    Will only consider directories that match pipeline_name.
+    Remove all but the last arg_keep_versions in the directory.
+    Will never remove the target_dir that we just deployed.
+    Will only consider directories that match the pattern.
     """
     directories = glob.glob(args_extract_directory + "/" + pipeline_name + "-#*")
   
