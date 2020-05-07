@@ -207,7 +207,7 @@ def tidy_extract_directory(target_dir, pipeline_name):
     Will never remove the target_dir that we just deployed.
     Will only consider directories that match the pattern.
     """
-    directories = glob.glob(args_extract_directory + "/" + pipeline_name + "-#*")
+    directories = glob.glob(args_extract_directory + "/*-#*")
   
     directories.sort(key = lambda x: os.path.getmtime(x))
     to_delete = directories[:-arg_keep_versions]
@@ -268,7 +268,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--keep-versions", help=(
+        "--keep-versions", type=int, help=(
             "Retain only this number of versions on disk. Set to a positive "
             "integer. Defaults to keeping all versions."
         )
