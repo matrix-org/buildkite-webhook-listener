@@ -26,6 +26,7 @@ import errno
 import logging
 import os
 import re
+import shutil
 import tarfile
 import threading
 
@@ -42,6 +43,7 @@ arg_symlink = None
 arg_webhook_token = None
 arg_api_token = None
 arg_artifact_pattern = None
+arg_keep_versions = None
 
 deploy_lock = threading.Lock()
 
@@ -168,6 +170,8 @@ def on_receive_buildkite_poke():
         with deploy_lock:
             logger.info("Got deploy lock; deploying to %s", target_dir)
             deploy_tarball(url, target_dir)
+            if arg_keep_versions is not None:
+                tidy_extract_directory(target_dir)
 
     threading.Thread(target=deploy).start()
 
@@ -195,8 +199,26 @@ def deploy_tarball(artifact_url, target_dir):
     logger.info("...download complete.")
 
     create_symlink(source=target_dir, linkname=arg_symlink)
+    
 
+def tidy_extract_directory(target_dir):
+    """
+    Remove all but the last arg_keep_versions in the directory.
+    Will never remove the target_dir that we just deployed.
+    Will only consider directories that match the pattern.
 
+    Args:
+       target_dir: absolute path to the directory where files are unpacked
+    """
+    directories = glob.glob(args_extract_directory + "/*-#*")
+  
+    directories.sort(key = lambda x: os.path.getmtime(x))
+    to_delete = directories[:-arg_keep_versions]
+
+    for target in to_delete:
+        if target != target_dir: 
+            shutil.rmtree(target)
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Runs a redeployment server.")
     parser.add_argument(
@@ -248,13 +270,25 @@ if __name__ == "__main__":
         )
     )
 
+    parser.add_argument(
+        "--keep-versions", type=int, help=(
+            "Retain only this number of versions on disk. Set to a positive "
+            "integer. Defaults to keeping all versions."
+        )
+    )
+
     args = parser.parse_args()
+
+    if args.keep_versions is not None and args.keep_versions < 1:
+        parser.error("keep-versions should be unset or > 0")
+
     arg_extract_path = args.extract
     arg_symlink = args.symlink
     arg_webbook_token = args.webhook_token
     arg_api_token = args.api_token
     arg_buildkite_org = args.buildkite_org
     arg_artifact_pattern = args.artifact_pattern
+    arg_keep_versions = args.keep_versions
 
     if not os.path.isdir(arg_extract_path):
         os.mkdir(arg_extract_path)
@@ -268,4 +302,12 @@ if __name__ == "__main__":
         ),
         flush=True,
     )
+    if arg_keep_versions is not None:
+        print(
+            "Keeping only previous %i versions." % (arg_keep_versions, ),
+            flush=True,
+        )
+    else:
+        print("Keeping all versions") 
+
     app.run(port=args.port, debug=False)
