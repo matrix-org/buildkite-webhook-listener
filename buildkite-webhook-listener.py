@@ -171,7 +171,7 @@ def on_receive_buildkite_poke():
             logger.info("Got deploy lock; deploying to %s", target_dir)
             deploy_tarball(url, target_dir)
             if arg_keep_versions is not None:
-                tidy_extract_directory(target_dir, pipeline_name)
+                tidy_extract_directory(target_dir)
 
     threading.Thread(target=deploy).start()
 
@@ -201,11 +201,14 @@ def deploy_tarball(artifact_url, target_dir):
     create_symlink(source=target_dir, linkname=arg_symlink)
     
 
-def tidy_extract_directory(target_dir, pipeline_name):
+def tidy_extract_directory(target_dir):
     """
     Remove all but the last arg_keep_versions in the directory.
     Will never remove the target_dir that we just deployed.
     Will only consider directories that match the pattern.
+
+    Args:
+       target_dir: absolute path to the directory where files are unpacked
     """
     directories = glob.glob(args_extract_directory + "/*-#*")
   
