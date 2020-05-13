@@ -301,7 +301,7 @@ if __name__ == "__main__":
     )
     if arg_keep_versions is not None:
         print(
-            "Keeping only previous %s versions." % ( arg_keep_versions ),
+            "Keeping only previous %i versions." % (arg_keep_versions, ),
             flush=True,
         )
     else:
