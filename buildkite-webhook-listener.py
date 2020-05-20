@@ -24,6 +24,7 @@ from __future__ import print_function
 import argparse
 import errno
 import logging
+import glob
 import os
 import re
 import shutil
@@ -165,13 +166,15 @@ def on_receive_buildkite_poke():
     # buildkite times out the request if it takes longer than 10s, and fetching
     # the tarball may take some time, so we return success now and run the
     # download and deployment in the background.
+    versions_to_keep = arg_keep_versions
+    cleanup_dir = arg_extract_path
     def deploy():
         logger.info("awaiting deploy lock")
         with deploy_lock:
             logger.info("Got deploy lock; deploying to %s", target_dir)
             deploy_tarball(url, target_dir)
-            if arg_keep_versions is not None:
-                tidy_extract_directory(target_dir)
+            if versions_to_keep is not None:
+                tidy_extract_directory(target_dir, cleanup_dir, versions_to_keep)
 
     threading.Thread(target=deploy).start()
 
@@ -201,22 +204,24 @@ def deploy_tarball(artifact_url, target_dir):
     create_symlink(source=target_dir, linkname=arg_symlink)
     
 
-def tidy_extract_directory(target_dir):
+def tidy_extract_directory(target_dir, cleanup_dir, versions_to_keep):
     """
     Remove all but the last arg_keep_versions in the directory.
     Will never remove the target_dir that we just deployed.
     Will only consider directories that match the pattern.
 
     Args:
-       target_dir: absolute path to the directory where files are unpacked
+       target_dir: absolute path to where the most recent deployment was unpacked
+       cleanup_dir: absolute path to the directory where files are unpacked
+       versions_to_keep: count of versions to keep
     """
-    directories = glob.glob(args_extract_directory + "/*-#*")
-  
+    directories = glob.glob(cleanup_dir + "/*-#*")
     directories.sort(key = lambda x: os.path.getmtime(x))
-    to_delete = directories[:-arg_keep_versions]
-
+    to_delete = directories[:-versions_to_keep]
+    logger.info("Deleting %i of %i directories", len(to_delete), len(directories))
     for target in to_delete:
-        if target != target_dir: 
+        if target != target_dir:
+            logger.info("Deleting %s", target)
             shutil.rmtree(target)
         
 if __name__ == "__main__":
