@@ -2,10 +2,11 @@
 #
 # auto-deploy listener script
 #
-# Listens for buildkite webhook pokes. When it gets one, downloads the artifact
-# from buildkite and unpacks it.
+# Listens for Github webhook pokes. When it gets one, downloads the artifact
+# from Github and unpacks it.
 #
 # Copyright 2019 New Vector Ltd
+# Copyright 2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,14 +23,19 @@
 from __future__ import print_function
 
 import argparse
+from dateutil import parser as dateparser
 import errno
 import logging
 import glob
+import hashlib
+import hmac
+from io import BytesIO
 import os
 import re
 import shutil
 import tarfile
 import threading
+import zipfile
 
 from flask import Flask, abort, jsonify, request
 import requests
@@ -64,21 +70,30 @@ def create_symlink(source, linkname):
 
 def req_headers():
     return {
-        "Authorization": "Bearer %s" % (arg_api_token,),
+        "Authorization": "token %s" % (arg_api_token,),
     }
 
 
+def validate_signature(data, signature, token):
+    github_secret = bytes(token, 'utf-8')
+    expected_signature = hmac.new(key=github_secret, msg=data, digestmod=hashlib.sha256).hexdigest()
+    signature = signature.split('sha256=')[-1].strip()
+    return hmac.compare_digest(signature, expected_signature)
+
+
 @app.route("/", methods=["POST"])
-def on_receive_buildkite_poke():
-    got_webhook_token = request.headers.get('X-Buildkite-Token')
-    if got_webhook_token != arg_webbook_token:
+def on_receive_poke():
+    incoming_signature = request.headers.get('X-Hub-Signature-256')
+    incoming_data = request.data
+
+    if not validate_signature(incoming_data, incoming_signature, arg_webhook_token):
         logger.info("Denying request with incorrect webhook token: %s", got_webhook_token)
         abort(400, "Incorrect webhook token")
         return
 
     required_api_prefix = None
-    if arg_buildkite_org is not None:
-        required_api_prefix = 'https://api.buildkite.com/v2/organizations/%s' % (arg_buildkite_org,)
+    if arg_github_org is not None:
+        required_api_prefix = f'https://api.github.com/repos/{arg_github_org}/matrix.org/actions/artifacts'
 
     incoming_json = request.get_json()
     if not incoming_json:
@@ -86,59 +101,49 @@ def on_receive_buildkite_poke():
         return
     logger.debug("Incoming JSON: %s", incoming_json)
 
-    event = incoming_json.get("event")
-    if event is None:
-        abort(400, "No 'event' specified")
+    action = incoming_json.get("action")
+    if action is None:
+        abort(400, "No 'action' specified")
         return
 
-    if event == 'ping':
-        logger.info("Got ping request - responding")
-        return jsonify({'response': 'pong!'})
+    if action == "completed":
+        logger.info("Workflow completed")
+    else:
+        abort(400, "Not a suitable event")
+        return
 
-    if event != 'build.finished':
+    workflow_status = incoming_json["workflow_run"]["conclusion"]
+    if workflow_status == "success":
+        logger.info("Workflow succeeded")
+    else:
         logger.info("Rejecting '%s' event", event)
         abort(400, "Unrecognised event")
         return
 
-    build_obj = incoming_json.get("build")
-    if build_obj is None:
-        abort(400, "No 'build' object")
+    build_id = incoming_json["workflow_run"]["id"]
+    if build_id is None:
+        abort(400, "No 'id' specified")
         return
 
-    build_url = build_obj.get('url')
-    if build_url is None:
-        abort(400, "build has no url")
+    workflow_id = incoming_json["workflow_run"]["workflow_id"]
+    if workflow_id is None:
+        abort(400, "No 'workflow_id' specified")
         return
 
-    if required_api_prefix is not None and not build_url.startswith(required_api_prefix):
-        logger.info("Denying poke for build url with incorrect prefix: %s", build_url)
-        abort(400, "Invalid build url")
+    artifacts_url = incoming_json["workflow_run"]["artifacts_url"]
+    if artifacts_url is None:
+        abort(400, "No 'artifacts_url' specified")
         return
 
-    build_num = build_obj.get('number')
-    if build_num is None:
-        abort(400, "build has no number")
-        return
-
-    pipeline_obj = incoming_json.get("pipeline")
-    if pipeline_obj is None:
-        abort(400, "No 'pipeline' object")
-        return
-
-    pipeline_name = pipeline_obj.get('slug')
-    if pipeline_name is None:
-        abort(400, "pipeline has no slug")
-        return
-
-    artifacts_url = build_url + "/artifacts"
-    logger.info("fetching %s", artifacts_url)
+    logger.info("Fetching %s", artifacts_url)
     artifacts_resp = requests.get(artifacts_url, headers=req_headers())
     artifacts_resp.raise_for_status()
-    artifacts_array = artifacts_resp.json()
+    artifacts_array = artifacts_resp.json()['artifacts']
 
     artifact_to_deploy = None
     for artifact in artifacts_array:
-        if re.match(arg_artifact_pattern, artifact['path']):
+        logging.info("Artifact name is %s", artifact['name'])
+        if re.match(arg_artifact_pattern, artifact['name']):
             artifact_to_deploy = artifact
 
     if artifact_to_deploy is None:
@@ -146,7 +151,7 @@ def on_receive_buildkite_poke():
         return jsonify({})
 
     # double paranoia check: make sure the artifact is on the right org too
-    url = artifact_to_deploy['download_url']
+    url = artifact_to_deploy['archive_download_url']
     if required_api_prefix is not None and not url.startswith(required_api_prefix):
         logger.info("Denying poke for build url with incorrect prefix: %s", url)
         abort(400, "Refusing to deploy artifact from URL %s", url)
@@ -159,11 +164,11 @@ def on_receive_buildkite_poke():
     #       a good deploy with a bad one
     #   (b) we'll be overwriting the live deployment, which means people might
     #       see half-written files.
-    target_dir = os.path.join(arg_extract_path, "%s-#%i" % (pipeline_name, build_num))
+    target_dir = os.path.join(arg_extract_path, "%s-#%i" % (workflow_id, build_id))
     if os.path.exists(target_dir):
         abort(400, "Not deploying. We have previously deployed this build.")
 
-    # buildkite times out the request if it takes longer than 10s, and fetching
+    # Github might time out the request if it takes longer than 10s, and fetching
     # the tarball may take some time, so we return success now and run the
     # download and deployment in the background.
     versions_to_keep = arg_keep_versions
@@ -182,7 +187,7 @@ def on_receive_buildkite_poke():
 
 
 def deploy_tarball(artifact_url, target_dir):
-    """Download a tarball from buildkite and unpack it
+    """Download a tarball from Github and unpack it
 
     Returns:
         (str) the path to the unpacked deployment
@@ -195,9 +200,14 @@ def deploy_tarball(artifact_url, target_dir):
     resp = requests.get(artifact_url, stream=True, headers=req_headers())
     resp.raise_for_status()
 
+    # GHA artifacts are wrapped in a zip file, so we extract it to get our tarball
+    # See https://github.com/actions/upload-artifact/issues/109
+    zipped_artifact = zipfile.ZipFile(BytesIO(resp.content))
+    tarball = zipped_artifact.open('content.tar.gz')
+
     # TODO: make the compression type depend on the filename
     # (or copy it to a temporary file so that tarfile can autodetect)
-    with tarfile.open(fileobj=resp.raw, mode="r:gz") as tar:
+    with tarfile.open(fileobj=tarball, mode="r:gz") as tar:
         tar.extractall(path=target_dir)
     logger.info("...download complete.")
 
@@ -228,7 +238,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Runs a redeployment server.")
     parser.add_argument(
         "-p", "--port", dest="port", default=4000, type=int, help=(
-            "The port to listen on for requests from Buildkite. "
+            "The port to listen on for requests from Github. "
             "Default: %(default)i"
         )
     )
@@ -249,27 +259,27 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--webhook-token", dest="webhook_token", help=(
-            "Only accept pokes with this buildkite token."
+            "Only accept pokes with this Github token."
         ), required=True,
     )
 
     parser.add_argument(
         "--api-token", dest="api_token", help=(
-            "API access token for buildkite. Requires read_artifacts scope."
+            "API access token for Github. Requires repo scope."
         ), required=True,
     )
 
     # We require a matching webhook token, but because we take everything else
     # about what to deploy from the poke body, we can be a little more paranoid
-    # and only accept builds / artifacts from a specific buildkite org
+    # and only accept builds / artifacts from a specific Github org
     parser.add_argument(
-        "--org", dest="buildkite_org", help=(
-            "Lock down to this buildkite org"
+        "--org", dest="github_org", help=(
+            "Lock down to this Github org"
         )
     )
 
     parser.add_argument(
-        "--artifact-pattern", default="dist/.*.tar.gz", help=(
+        "--artifact-pattern", default="merged-content-artifact", help=(
             "Define a regex which artifact names must match. "
             "Default: %(default)s"
         )
@@ -289,9 +299,9 @@ if __name__ == "__main__":
 
     arg_extract_path = args.extract
     arg_symlink = args.symlink
-    arg_webbook_token = args.webhook_token
+    arg_webhook_token = args.webhook_token
     arg_api_token = args.api_token
-    arg_buildkite_org = args.buildkite_org
+    arg_github_org = args.github_org
     arg_artifact_pattern = args.artifact_pattern
     arg_keep_versions = args.keep_versions
 

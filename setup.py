@@ -18,13 +18,14 @@
 from setuptools import setup
 
 setup(
-    name="buildkite-webhook-listener",
+    name="gha-webhook-listener",
     install_requires=[
+        "python-dateutil",
         "flask",
         "requests",
     ],
-    python_requires='>=3.5',
+    python_requires='>=3.6',
     scripts=[
-        "buildkite-webhook-listener.py",
+        "gha-webhook-listener.py",
     ],
 )
